@@ -288,7 +288,7 @@ module RecordCache
         o.to_sym
       end
 
-      def visit_Object o, attribute=null
+      def visit_Object(o, attribute=nil)
         o
       end
       alias :visit_Arel_Nodes_SqlLiteral :visit_Object
