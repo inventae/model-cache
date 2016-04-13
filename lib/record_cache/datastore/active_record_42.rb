@@ -25,29 +25,33 @@ module RecordCache
         end
 
         # Retrieve the records, possibly from cache
-        def find_by_sql_with_record_cache(sql)
-          # shortcut, no caching please
-          return find_by_sql_without_record_cache(sql) unless record_cache?
+        def find_by_sql_with_record_cache(sql, binds = [])
+          # Shortcut, no caching please
+          return find_by_sql_without_record_cache(sql, binds) unless record_cache?
 
-          arel = sql.instance_variable_get(:@arel)
+          # check the piggy-back'd ActiveRelation record to see if the query can be retrieved from cache
+          arel = sql.is_a?(String) ? sql.instance_variable_get(:@arel) : sql
+
           sanitized_sql = sanitize_sql(sql)
+          sanitized_sql = connection.to_sql(sanitized_sql, binds) if sanitized_sql.respond_to?(:ast)
 
-          records = if connection.instance_variable_get(:@query_cache_enabled)
+          records = if connection.query_cache_enabled
                       query_cache = connection.instance_variable_get(:@query_cache)
-                      query_cache["rc/#{sanitized_sql}"] ||= try_record_cache(sanitized_sql, arel)
+                      query_cache["rc/#{sanitized_sql}"][binds] ||= try_record_cache(arel, sql, binds)
+
                     elsif connection.open_transactions > RC_TRANSACTIONS_THRESHOLD
-                      connection.send(:select, sanitized_sql, "#{name} Load")
+                      find_by_sql_without_record_cache(sql, binds)
+
                     else
-                      try_record_cache(sanitized_sql, arel)
+                      try_record_cache(arel, sql, binds)
                     end
-          records.collect! { |record| instantiate(record) } if records[0].is_a?(Hash)
           records
         end
 
-        def try_record_cache(sql, arel)
-          query = arel && arel.respond_to?(:ast) ? RecordCache::Arel::QueryVisitor.new.accept(arel.ast) : nil
+        def try_record_cache(arel, sql, binds)
+          query = arel && arel.respond_to?(:ast) ? RecordCache::Arel::QueryVisitor.new(binds).accept(arel.ast) : nil
           record_cache.fetch(query) do
-            connection.send(:select, sql, "#{name} Load")
+            find_by_sql_without_record_cache(sql, binds)
           end
         end
 
@@ -90,8 +94,9 @@ module RecordCache
       DESC = "DESC".freeze
       COMMA = ",".freeze
 
-      def initialize
+      def initialize(bindings)
         super()
+        @bindings = (bindings || []).inject({}){ |h, cv| column, value = cv; h[column.name] = value; h}
         @cacheable  = true
         @query = ::RecordCache::Query.new
       end
@@ -103,22 +108,61 @@ module RecordCache
 
       private
 
-      def not_cacheable o
+      def not_cacheable o, attribute
         @cacheable = false
       end
 
-      def skip o
+      def skip o, attribute
       end
 
       alias :visit_Arel_Nodes_TableAlias :not_cacheable
 
       alias :visit_Arel_Nodes_Lock :not_cacheable
 
-      alias :visit_Arel_Nodes_Sum   :not_cacheable
-      alias :visit_Arel_Nodes_Max   :not_cacheable
-      alias :visit_Arel_Nodes_Min   :not_cacheable
-      alias :visit_Arel_Nodes_Avg   :not_cacheable
-      alias :visit_Arel_Nodes_Count :not_cacheable
+      alias :visit_Arel_Nodes_Sum            :not_cacheable
+      alias :visit_Arel_Nodes_Max            :not_cacheable
+      alias :visit_Arel_Nodes_Min            :not_cacheable
+      alias :visit_Arel_Nodes_Avg            :not_cacheable
+      alias :visit_Arel_Nodes_Count          :not_cacheable
+      alias :visit_Arel_Nodes_Addition       :not_cacheable
+      alias :visit_Arel_Nodes_Subtraction    :not_cacheable
+      alias :visit_Arel_Nodes_Multiplication :not_cacheable
+      alias :visit_Arel_Nodes_NamedFunction  :not_cacheable
+
+      alias :visit_Arel_Nodes_Bin :not_cacheable
+      alias :visit_Arel_Nodes_Distinct :not_cacheable
+      alias :visit_Arel_Nodes_DistinctOn :not_cacheable
+      alias :visit_Arel_Nodes_Division :not_cacheable
+      alias :visit_Arel_Nodes_Except :not_cacheable
+      alias :visit_Arel_Nodes_Exists :not_cacheable
+      alias :visit_Arel_Nodes_InfixOperation :not_cacheable
+      alias :visit_Arel_Nodes_Intersect :not_cacheable
+      alias :visit_Arel_Nodes_Union :not_cacheable
+      alias :visit_Arel_Nodes_UnionAll :not_cacheable
+      alias :visit_Arel_Nodes_With :not_cacheable
+      alias :visit_Arel_Nodes_WithRecursive :not_cacheable
+
+      def visit_Arel_Nodes_JoinSource o, attribute
+        # left and right are array, but using blank as it also works for nil
+        @cacheable = o.left.blank? || o.right.blank?
+      end
+
+      alias :visit_Arel_Nodes_CurrentRow :not_cacheable
+      alias :visit_Arel_Nodes_Extract :not_cacheable
+      alias :visit_Arel_Nodes_Following :not_cacheable
+      alias :visit_Arel_Nodes_NamedWindow :not_cacheable
+      alias :visit_Arel_Nodes_Over :not_cacheable
+      alias :visit_Arel_Nodes_Preceding :not_cacheable
+      alias :visit_Arel_Nodes_Range :not_cacheable
+      alias :visit_Arel_Nodes_Rows :not_cacheable
+      alias :visit_Arel_Nodes_Window :not_cacheable
+
+      alias :visit_Arel_Nodes_As :skip
+      alias :visit_Arel_SelectManager :not_cacheable
+      alias :visit_Arel_Nodes_Ascending :skip
+      alias :visit_Arel_Nodes_Descending :skip
+      alias :visit_Arel_Nodes_False :skip
+      alias :visit_Arel_Nodes_True :skip
 
       alias :visit_Arel_Nodes_StringJoin :not_cacheable
       alias :visit_Arel_Nodes_InnerJoin  :not_cacheable
@@ -128,13 +172,6 @@ module RecordCache
       alias :visit_Arel_Nodes_InsertStatement  :not_cacheable
       alias :visit_Arel_Nodes_UpdateStatement  :not_cacheable
 
-      alias :visit_Arel_Nodes_Except :not_cacheable
-      alias :visit_Arel_Nodes_Exists :not_cacheable
-      alias :visit_Arel_Nodes_Intersect :not_cacheable
-      alias :visit_Arel_Nodes_Union :not_cacheable
-      alias :visit_Arel_Nodes_UnionAll :not_cacheable
-
-      alias :visit_Arel_Nodes_As :skip
 
       alias :unary                              :not_cacheable
       alias :visit_Arel_Nodes_Group             :unary
@@ -143,22 +180,22 @@ module RecordCache
       alias :visit_Arel_Nodes_On                :unary
       alias :visit_Arel_Nodes_UnqualifiedColumn :unary
 
-      def visit_Arel_Nodes_Offset o
+      def visit_Arel_Nodes_Offset o, attribute
         @cacheable = false unless o.expr == 0
       end
 
-      def visit_Arel_Nodes_Values o
+      def visit_Arel_Nodes_Values o, attribute
         visit o.expressions if @cacheable
       end
 
-      def visit_Arel_Nodes_Limit o
+      def visit_Arel_Nodes_Limit o, attribute
         @query.limit = o.expr
       end
       alias :visit_Arel_Nodes_Top :visit_Arel_Nodes_Limit
 
       GROUPING_EQUALS_REGEXP = /^\W?(\w*)\W?\.\W?(\w*)\W?\s*=\s*(\d+)$/        # `calendars`.account_id = 5
       GROUPING_IN_REGEXP = /^^\W?(\w*)\W?\.\W?(\w*)\W?\s*IN\s*\(([\d\s,]+)\)$/ # `service_instances`.`id` IN (118,80,120,82)
-      def visit_Arel_Nodes_Grouping o
+      def visit_Arel_Nodes_Grouping o, attribute
         return unless @cacheable
         if @table_name && o.expr =~ GROUPING_EQUALS_REGEXP && $1 == @table_name
           @cacheable = @query.where($2, $3.to_i)
@@ -169,14 +206,15 @@ module RecordCache
         end
       end
 
-      def visit_Arel_Nodes_SelectCore o
+      def visit_Arel_Nodes_SelectCore o, attribute
         @cacheable = false unless o.groups.empty?
         visit o.froms  if @cacheable
         visit o.wheres if @cacheable
+        visit o.source if @cacheable
         @cacheable = o.projections.none?{ |projection| projection.to_s =~ /distinct/i } unless o.projections.empty? if @cacheable
       end
 
-      def visit_Arel_Nodes_SelectStatement o
+      def visit_Arel_Nodes_SelectStatement o, attribute=nil
         @cacheable = false if o.cores.size > 1
         if @cacheable
           visit o.offset
@@ -199,15 +237,11 @@ module RecordCache
         end
       end
 
-      def visit_Arel_Table o
+      def visit_Arel_Table o, attribute
         @table_name = o.name
       end
 
-      def visit_Arel_Nodes_Ordering o
-        [visit(o.expr), o.descending]
-      end
-
-      def visit_Arel_Attributes_Attribute o
+      def visit_Arel_Attributes_Attribute o, attribute
         o.name.to_sym
       end
       alias :visit_Arel_Attributes_Integer   :visit_Arel_Attributes_Attribute
@@ -216,17 +250,21 @@ module RecordCache
       alias :visit_Arel_Attributes_Time      :visit_Arel_Attributes_Attribute
       alias :visit_Arel_Attributes_Boolean   :visit_Arel_Attributes_Attribute
       alias :visit_Arel_Attributes_Decimal   :visit_Arel_Attributes_Attribute
-
-      def visit_Arel_Nodes_Equality o
+      alias :visit_Arel_Attributes_Uuid   :visit_Arel_Attributes_Attribute
+      def visit_Arel_Nodes_Equality o, attribute
         key, value = visit(o.left), visit(o.right)
-#        p "  =====> equality found: #{key.inspect}@#{key.class.name} => #{value.inspect}@#{value.class.name}"
+        # several different binding markers exist depending on the db driver used (MySQL, Postgress supported)
+        if value.to_s =~ /^(\?|\u0000|\$\d+)$/
+          # puts "bindings: #{@bindings.inspect}, key = #{key.to_s}"
+          value = @bindings[key.to_s] || value
+        end
+        # puts "  =====> equality found: #{key.inspect}@#{key.class.name} => #{value.inspect}@#{value.class.name}"
         @query.where(key, value)
       end
       alias :visit_Arel_Nodes_In                 :visit_Arel_Nodes_Equality
 
-      def visit_Arel_Nodes_And o
-        visit(o.left)
-        visit(o.right)
+      def visit_Arel_Nodes_And o, attribute
+        visit(o.children)
       end
 
       alias :visit_Arel_Nodes_Or                 :not_cacheable
@@ -241,19 +279,20 @@ module RecordCache
       alias :visit_Arel_Nodes_DoesNotMatch       :not_cacheable
       alias :visit_Arel_Nodes_Matches            :not_cacheable
 
-      def visit_Fixnum o
+      def visit_Fixnum o, attribute
         o.to_i
       end
       alias :visit_Bignum :visit_Fixnum
 
-      def visit_Symbol o
+      def visit_Symbol o, attribute
         o.to_sym
       end
 
-      def visit_Object o
+      def visit_Object o, attribute=null
         o
       end
       alias :visit_Arel_Nodes_SqlLiteral :visit_Object
+      alias :visit_Arel_Nodes_BindParam :visit_Object
       alias :visit_Arel_SqlLiteral :visit_Object # This is deprecated
       alias :visit_String :visit_Object
       alias :visit_NilClass :visit_Object
@@ -267,7 +306,7 @@ module RecordCache
       alias :visit_DateTime :visit_Object
       alias :visit_Hash :visit_Object
 
-      def visit_Array o
+      def visit_Array o, attribute
         o.map{ |x| visit x }
       end
     end
@@ -304,12 +343,12 @@ module RecordCache
           nil
         end
 
-        def update_all_with_record_cache(updates, conditions = nil, options = {})
-          result = update_all_without_record_cache(updates, conditions, options)
+        def update_all_with_record_cache(updates)
+          result = update_all_without_record_cache(updates)
 
           if record_cache?
             # when this condition is met, the arel.update method will be called on the current scope, see ActiveRecord::Relation#update_all
-            unless conditions || options.present? || @limit_value.present? != @order_values.present?
+            unless @limit_value.present? != @order_values.present?
               # get all attributes that contain a unique index for this model
               unique_index_attributes = RecordCache::Strategy::UniqueIndexCache.attributes(self)
               # go straight to SQL result (without instantiating records) for optimal performance
@@ -317,7 +356,7 @@ module RecordCache
                 sub_select = select(unique_index_attributes.map(&:to_s).join(','))
                 in_clause = __find_in_clause(sub_select)
                 if unique_index_attributes.size == 1 && in_clause &&
-                   in_clause.left.try(:name).to_s == unique_index_attributes.first.to_s
+                  in_clause.left.try(:name).to_s == unique_index_attributes.first.to_s
                   # common case where the unique index is the (only) constraint on the query: SELECT id FROM people WHERE id in (...)
                   attribute = unique_index_attributes.first
                   in_clause.right.each do |value|
@@ -359,12 +398,40 @@ module RecordCache
       end
 
       module InstanceMethods
-        def delete_records_with_record_cache(records)
+        def delete_records_with_record_cache(records, method)
+          records = load_target if records == :all
           # invalidate :id cache for all records
           records.each{ |record| record.class.record_cache.invalidate(record.id) if record.class.record_cache? unless record.new_record? }
           # invalidate the referenced class for the attribute/value pair on the index cache
-          @reflection.klass.record_cache.invalidate(@reflection.primary_key_name.to_sym, @owner.id) if @reflection.klass.record_cache?
-          delete_records_without_record_cache(records)
+          @reflection.klass.record_cache.invalidate(@reflection.foreign_key.to_sym, @owner.id) if @reflection.klass.record_cache?
+          delete_records_without_record_cache(records, method)
+        end
+      end
+    end
+
+    module HasOne
+      class << self
+        def included(klass)
+          klass.extend ClassMethods
+          klass.send(:include, InstanceMethods)
+          klass.class_eval do
+            alias_method_chain :delete, :record_cache
+          end
+        end
+      end
+
+      module ClassMethods
+      end
+
+      module InstanceMethods
+        def delete_with_record_cache(method = options[:dependent])
+          # invalidate :id cache for all record
+          if load_target
+            target.class.record_cache.invalidate(target.id) if target.class.record_cache? unless target.new_record?
+          end
+          # invalidate the referenced class for the attribute/value pair on the index cache
+          @reflection.klass.record_cache.invalidate(@reflection.foreign_key.to_sym, @owner.id) if @reflection.klass.record_cache?
+          delete_without_record_cache(method)
         end
       end
     end
@@ -376,3 +443,4 @@ ActiveRecord::Base.send(:include, RecordCache::ActiveRecord::Base)
 Arel::TreeManager.send(:include, RecordCache::Arel::TreeManager)
 ActiveRecord::Relation.send(:include, RecordCache::ActiveRecord::UpdateAll)
 ActiveRecord::Associations::HasManyAssociation.send(:include, RecordCache::ActiveRecord::HasMany)
+ActiveRecord::Associations::HasOneAssociation.send(:include, RecordCache::ActiveRecord::HasOne)
