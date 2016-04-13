@@ -108,11 +108,11 @@ module RecordCache
 
       private
 
-      def not_cacheable o, attribute
+      def not_cacheable o, attribute=nil
         @cacheable = false
       end
 
-      def skip o, attribute
+      def skip o, attribute=nil
       end
 
       alias :visit_Arel_Nodes_TableAlias :not_cacheable
@@ -142,7 +142,7 @@ module RecordCache
       alias :visit_Arel_Nodes_With :not_cacheable
       alias :visit_Arel_Nodes_WithRecursive :not_cacheable
 
-      def visit_Arel_Nodes_JoinSource o, attribute
+      def visit_Arel_Nodes_JoinSource o, attribute=nil
         # left and right are array, but using blank as it also works for nil
         @cacheable = o.left.blank? || o.right.blank?
       end
@@ -180,22 +180,22 @@ module RecordCache
       alias :visit_Arel_Nodes_On                :unary
       alias :visit_Arel_Nodes_UnqualifiedColumn :unary
 
-      def visit_Arel_Nodes_Offset o, attribute
+      def visit_Arel_Nodes_Offset o, attribute=nil
         @cacheable = false unless o.expr == 0
       end
 
-      def visit_Arel_Nodes_Values o, attribute
+      def visit_Arel_Nodes_Values o, attribute=nil
         visit o.expressions if @cacheable
       end
 
-      def visit_Arel_Nodes_Limit o, attribute
+      def visit_Arel_Nodes_Limit o, attribute=nil
         @query.limit = o.expr
       end
       alias :visit_Arel_Nodes_Top :visit_Arel_Nodes_Limit
 
       GROUPING_EQUALS_REGEXP = /^\W?(\w*)\W?\.\W?(\w*)\W?\s*=\s*(\d+)$/        # `calendars`.account_id = 5
       GROUPING_IN_REGEXP = /^^\W?(\w*)\W?\.\W?(\w*)\W?\s*IN\s*\(([\d\s,]+)\)$/ # `service_instances`.`id` IN (118,80,120,82)
-      def visit_Arel_Nodes_Grouping o, attribute
+      def visit_Arel_Nodes_Grouping o, attribute=nil
         return unless @cacheable
         if @table_name && o.expr =~ GROUPING_EQUALS_REGEXP && $1 == @table_name
           @cacheable = @query.where($2, $3.to_i)
@@ -206,7 +206,7 @@ module RecordCache
         end
       end
 
-      def visit_Arel_Nodes_SelectCore o, attribute
+      def visit_Arel_Nodes_SelectCore o, attribute=nil
         @cacheable = false unless o.groups.empty?
         visit o.froms  if @cacheable
         visit o.wheres if @cacheable
@@ -237,11 +237,11 @@ module RecordCache
         end
       end
 
-      def visit_Arel_Table o, attribute
+      def visit_Arel_Table o, attribute=nil
         @table_name = o.name
       end
 
-      def visit_Arel_Attributes_Attribute o, attribute
+      def visit_Arel_Attributes_Attribute o, attribute=nil
         o.name.to_sym
       end
       alias :visit_Arel_Attributes_Integer   :visit_Arel_Attributes_Attribute
@@ -251,7 +251,7 @@ module RecordCache
       alias :visit_Arel_Attributes_Boolean   :visit_Arel_Attributes_Attribute
       alias :visit_Arel_Attributes_Decimal   :visit_Arel_Attributes_Attribute
       alias :visit_Arel_Attributes_Uuid   :visit_Arel_Attributes_Attribute
-      def visit_Arel_Nodes_Equality o, attribute
+      def visit_Arel_Nodes_Equality o, attribute=nil
         key, value = visit(o.left), visit(o.right)
         # several different binding markers exist depending on the db driver used (MySQL, Postgress supported)
         if value.to_s =~ /^(\?|\u0000|\$\d+)$/
@@ -263,7 +263,7 @@ module RecordCache
       end
       alias :visit_Arel_Nodes_In                 :visit_Arel_Nodes_Equality
 
-      def visit_Arel_Nodes_And o, attribute
+      def visit_Arel_Nodes_And o, attribute=nil
         visit(o.children)
       end
 
@@ -279,12 +279,12 @@ module RecordCache
       alias :visit_Arel_Nodes_DoesNotMatch       :not_cacheable
       alias :visit_Arel_Nodes_Matches            :not_cacheable
 
-      def visit_Fixnum o, attribute
+      def visit_Fixnum o, attribute=nil
         o.to_i
       end
       alias :visit_Bignum :visit_Fixnum
 
-      def visit_Symbol o, attribute
+      def visit_Symbol o, attribute=nil
         o.to_sym
       end
 
@@ -306,7 +306,7 @@ module RecordCache
       alias :visit_DateTime :visit_Object
       alias :visit_Hash :visit_Object
 
-      def visit_Array o, attribute
+      def visit_Array o, attribute=nil
         o.map{ |x| visit x }
       end
     end
